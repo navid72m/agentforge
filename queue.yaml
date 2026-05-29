@@ -1,0 +1,115 @@
+name: automatically_process_a_queue_of_incomin
+runtime: langgraph
+llm:
+  provider: openrouter
+  model: qwen/qwen3-coder:free
+  temperature: 0.1
+  base_url: https://openrouter.ai/api/v1
+agents:
+- id: queue_fetcher
+  role: 'Reads the job application PDF queue, loads the next PDF and emits ''ROUTE:
+    continue'' if more items remain or ''ROUTE: finish'' when the queue is empty.'
+  tools: []
+  memory: none
+  model: null
+- id: pdf_parser
+  role: Parses the loaded PDF into structured text using the doc_loader tool.
+  tools:
+  - doc_loader
+  memory: none
+  model: null
+- id: experience_extractor
+  role: Extracts the candidate's years of experience from the parsed text.
+  tools: []
+  memory: none
+  model: null
+- id: skill_extractor
+  role: Extracts the candidate's skill list from the parsed text.
+  tools: []
+  memory: none
+  model: null
+- id: skill_matcher
+  role: "Compares extracted skills to the required skill list and calculates a skill\u2011\
+    match percentage using the calculator tool."
+  tools:
+  - calculator
+  memory: none
+  model: null
+- id: router
+  role: "Evaluates experience and skill\u2011match percentage against thresholds and\
+    \ emits 'ROUTE: reject', 'ROUTE: maybe', or 'ROUTE: forward' for each outcome."
+  tools: []
+  memory: none
+  model: null
+- id: rejection_email_sender
+  role: "Sends the predefined templated rejection email to auto\u2011rejected applicants."
+  tools: []
+  memory: none
+  model: null
+- id: maybe_queue_placer
+  role: "Places the application into the maybe\u2011pile queue for further review."
+  tools: []
+  memory: none
+  model: null
+- id: forward_queue_placer
+  role: "Places the application into the hiring\u2011manager queue for forwarding."
+  tools: []
+  memory: none
+  model: null
+- id: summary_aggregator
+  role: Aggregates processing counts (total, rejected, maybe, forwarded) after the
+    loop finishes and produces the final summary report.
+  tools: []
+  memory: none
+  model: null
+graph:
+  entry: queue_fetcher
+  edges:
+  - from_: queue_fetcher
+    to: pdf_parser
+    condition: continue
+  - from_: pdf_parser
+    to: experience_extractor
+    condition: null
+  - from_: experience_extractor
+    to: skill_extractor
+    condition: null
+  - from_: skill_extractor
+    to: skill_matcher
+    condition: null
+  - from_: skill_matcher
+    to: router
+    condition: null
+  - from_: router
+    to: rejection_email_sender
+    condition: reject
+  - from_: router
+    to: maybe_queue_placer
+    condition: maybe
+  - from_: router
+    to: forward_queue_placer
+    condition: forward
+  - from_: rejection_email_sender
+    to: queue_fetcher
+    condition: null
+  - from_: forward_queue_placer
+    to: queue_fetcher
+    condition: null
+  - from_: maybe_queue_placer
+    to: queue_fetcher
+    condition: null
+  - from_: queue_fetcher
+    to: summary_aggregator
+    condition: finish
+  - from_: summary_aggregator
+    to: END
+    condition: null
+success_criteria:
+- All applications are processed without unhandled errors
+- "Experience and skill extraction accuracy \u2265 95% on a validation set"
+- Routing decisions match the defined thresholds for 100% of applications
+- "All auto\u2011rejected applicants receive the correct templated email"
+- "The final report lists correct counts for total, auto\u2011rejected, maybe, and\
+  \ forwarded applicants"
+- "Processing time meets any specified performance SLA (e.g., \u2264 5 seconds per\
+  \ application)"

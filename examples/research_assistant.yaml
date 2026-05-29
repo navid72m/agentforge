@@ -1,0 +1,27 @@
+name: research_assistant
+runtime: langgraph
+llm:
+  provider: openrouter
+  model: qwen/qwen3-coder:free
+  temperature: 0.1
+  base_url: https://openrouter.ai/api/v1
+agents:
+  - id: researcher
+    role: "Gather information and draft a summary answering the user's question."
+    tools: [doc_loader]
+    memory: vector
+  - id: critic
+    role: >
+      Review the researcher's draft for accuracy and gaps. If revision is needed,
+      emit a line 'ROUTE: needs_revision'. If the draft is good, emit 'ROUTE: approved'.
+    tools: []
+    memory: buffer
+graph:
+  entry: researcher
+  edges:
+    - { from: researcher, to: critic }
+    - { from: critic, to: researcher, condition: needs_revision }
+    - { from: critic, to: END, condition: approved }
+success_criteria:
+  - "Final answer addresses the user's question"
+  - "Critic approved the draft"

@@ -1,0 +1,60 @@
+name: generate_a_comparison_card_for_a_given_p
+runtime: langgraph
+llm:
+  provider: openrouter
+  model: qwen/qwen3-coder:free
+  temperature: 0.1
+  base_url: https://openrouter.ai/api/v1
+agents:
+- id: price_lookup_agent
+  role: Perform a product lookup to retrieve price information using the appropriate
+    API.
+  tools: []
+  memory: none
+  model: null
+- id: review_score_lookup_agent
+  role: Perform a product lookup to retrieve the average review score for the product.
+  tools: []
+  memory: none
+  model: null
+- id: specs_lookup_agent
+  role: Perform a product lookup to retrieve key specifications of the product.
+  tools: []
+  memory: none
+  model: null
+- id: missing_data_detector_agent
+  role: Detect any missing lookup result and replace the corresponding field value
+    with the string "unavailable".
+  tools: []
+  memory: none
+  model: null
+- id: comparison_card_assembler_agent
+  role: Combine price, review score, and specifications (or "unavailable" markers)
+    into a single structured comparison card.
+  tools: []
+  memory: none
+  model: null
+graph:
+  entry: price_lookup_agent
+  edges:
+  - from_: price_lookup_agent
+    to: review_score_lookup_agent
+    condition: null
+  - from_: review_score_lookup_agent
+    to: specs_lookup_agent
+    condition: null
+  - from_: specs_lookup_agent
+    to: missing_data_detector_agent
+    condition: null
+  - from_: missing_data_detector_agent
+    to: comparison_card_assembler_agent
+    condition: null
+  - from_: comparison_card_assembler_agent
+    to: END
+    condition: null
+success_criteria:
+- The comparison card includes a price field, an average review score field, and a
+  key specs field.
+- If a lookup returns no data, the corresponding field is explicitly labeled "unavailable".
+- All three lookups are executed independently.
+- The card format is consistent and parsable for downstream use.
