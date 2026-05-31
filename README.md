@@ -26,25 +26,28 @@ testable machinery — so generated systems are reproducible and debuggable.
 
 ---
 
+## Installation
+
+```bash
+pip install agentsynth
+```
+
 ## Quick start
 
 ```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Set your OpenRouter API key
+# 1. Set your OpenRouter API key
 echo "OPENROUTER_API_KEY=sk-or-..." > .env
 
-# 3. Generate a spec from a prompt
-python -m agentforge.cli generate "Build a research assistant that reads docs and summarises them"
+# 2. Generate a spec from a prompt
+agentforge generate "Build a research assistant that reads docs and summarises them"
 
-# 4. Validate the generated spec
-python -m agentforge.cli validate research_assistant.yaml
+# 3. Validate the generated spec
+agentforge validate research_assistant.yaml
 
-# 5. Compile to a runnable LangGraph app
-python -m agentforge.cli compile research_assistant.yaml -o research_app.py
+# 4. Compile to a runnable LangGraph app
+agentforge compile research_assistant.yaml -o research_app.py
 
-# 6. Run it
+# 5. Run it
 python research_app.py "What is retrieval-augmented generation?"
 ```
 
@@ -60,10 +63,10 @@ python research_app.py "What is retrieval-augmented generation?"
 
 ```bash
 # Override the model (any OpenRouter model ID)
-python -m agentforge.cli generate "..." --model qwen/qwen3-coder:free
+agentforge generate "..." --model qwen/qwen3-coder:free
 
 # Skip human review checkpoints (fully autonomous)
-python -m agentforge.cli generate "..." --no-review
+agentforge generate "..." --no-review
 ```
 
 ---
