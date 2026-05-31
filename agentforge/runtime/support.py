@@ -72,92 +72,77 @@ class _OpenRouterLLM:
         if self._tools:
             kwargs["tools"] = self._tools
 
-        resp = self._create_with_retry(kwargs)
+        resp = self._client_().chat.completions.create(**kwargs)
         return _Response(resp.choices[0].message.content or "")
-
-    def _create_with_retry(self, kwargs, max_attempts: int = 5):
-        """Call the completion endpoint, retrying on rate limits (HTTP 429).
-
-        Free/shared endpoints (and busy paid ones) return 429 with a
-        Retry-After hint. The OpenAI SDK's own retry doesn't reliably honor
-        provider-level 429s forwarded through OpenRouter, so we handle them
-        here: sleep for the server-suggested delay (capped), with exponential
-        backoff as a fallback, then re-raise if attempts are exhausted.
-        """
-        import time
-        import openai
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                return self._client_().chat.completions.create(**kwargs)
-            except openai.RateLimitError as e:
-                if attempt == max_attempts:
-                    raise
-                delay = self._retry_after_seconds(e)
-                if delay is None:
-                    delay = min(2 ** attempt, 30)  # 2,4,8,16,30 fallback
-                delay = min(delay, 60) + 0.5  # cap + small jitter
-                print(f"[agentforge] rate-limited (429); retrying in "
-                      f"{delay:.0f}s (attempt {attempt}/{max_attempts})...")
-                time.sleep(delay)
-
-    @staticmethod
-    def _retry_after_seconds(err) -> float | None:
-        """Extract a retry delay from a RateLimitError, if the provider gave one."""
-        # 1) Standard HTTP header.
-        resp = getattr(err, "response", None)
-        if resp is not None:
-            hdr = None
-            try:
-                hdr = resp.headers.get("Retry-After")
-            except Exception:
-                hdr = None
-            if hdr:
-                try:
-                    return float(hdr)
-                except (TypeError, ValueError):
-                    pass
-        # 2) OpenRouter nests retry_after_seconds in error.metadata.
-        body = getattr(err, "body", None)
-        if isinstance(body, dict):
-            meta = (body.get("error") or {}).get("metadata") or {}
-            for key in ("retry_after_seconds", "retry_after_seconds_raw"):
-                val = meta.get(key)
-                if val is not None:
-                    try:
-                        return float(val)
-                    except (TypeError, ValueError):
-                        pass
-        return None
 
     def bind_tools(self, tools):
         openai_tools = []
         for t in tools:
-            schema = {}
-            if hasattr(t, "args_schema") and t.args_schema is not None:
-                schema = getattr(t.args_schema, "schema", lambda: {})()
+            name, description, schema = self._tool_schema(t)
             openai_tools.append({
                 "type": "function",
                 "function": {
-                    "name": t.name,
-                    "description": getattr(t, "description", ""),
+                    "name": name,
+                    "description": description,
                     "parameters": schema,
                 },
             })
         return _OpenRouterLLM(self._model, self._api_key, self._base_url,
                               self._temperature, openai_tools)
 
+    @staticmethod
+    def _tool_schema(t):
+        """Derive (name, description, json_schema) from a tool that may be a
+        LangChain BaseTool OR a plain registered function. The registry stores
+        bare functions, so we introspect those rather than assuming .name etc."""
+        # LangChain-style tool object.
+        if hasattr(t, "name") and not callable(getattr(t, "name", None)):
+            name = t.name
+            description = getattr(t, "description", "") or ""
+            schema = {"type": "object", "properties": {}}
+            args_schema = getattr(t, "args_schema", None)
+            if args_schema is not None:
+                fn = getattr(args_schema, "model_json_schema", None) or \
+                     getattr(args_schema, "schema", None)
+                if fn:
+                    try:
+                        schema = fn()
+                    except Exception:
+                        pass
+            return name, description, schema
+
+        # Plain function: introspect name, docstring, and signature.
+        import inspect
+        name = getattr(t, "__name__", "tool")
+        description = (inspect.getdoc(t) or "").strip()
+        props, required = {}, []
+        try:
+            sig = inspect.signature(t)
+            for pname, param in sig.parameters.items():
+                if pname == "self":
+                    continue
+                ann = param.annotation
+                json_type = "string"
+                if ann in (int, float):
+                    json_type = "number"
+                elif ann is bool:
+                    json_type = "boolean"
+                props[pname] = {"type": json_type}
+                if param.default is inspect.Parameter.empty:
+                    required.append(pname)
+        except (TypeError, ValueError):
+            pass
+        schema = {"type": "object", "properties": props}
+        if required:
+            schema["required"] = required
+        return name, description, schema
+
     def with_structured_output(self, schema):
         return _StructuredWrapper(self, schema)
 
 
 def make_llm(
-    # NOTE: ':free' uses OpenRouter's SHARED free pool and is throttled upstream
-    # (frequent 429s, handled by retry below). For reliable throughput, add
-    # credit at openrouter.ai and switch to the paid id 'qwen/qwen3-coder'
-    # (drop ':free') here and in cli.py's --model default. To stay fully local
-    # instead, pass provider='ollama' with a local model.
-    model: str = "openai/gpt-oss-120b:free",
+    model: str = "qwen/qwen3-coder:free",
     base_url: str = "https://openrouter.ai/api/v1",
     temperature: float = 0.1,
     provider: str = "openrouter",
@@ -193,14 +178,27 @@ def resolve_tools(names: list[str]) -> list:
     return tools
 
 
-def build_messages(role: str, memory_kind: str, agent_id: str, state: dict) -> list:
-    """Assemble the message list for this agent's LLM call."""
+def build_messages(role: str, memory_kind: str, agent_id: str, state: dict,
+                   max_history: int = 8) -> list:
+    """Assemble the message list for this agent's LLM call.
+
+    Bounds the history to avoid unbounded context growth: in a cyclic graph,
+    every node appends to state['messages'], so passing the full list to each
+    call makes the prompt grow without limit and eventually exceeds the model's
+    context window. We keep the FIRST message (the original input/task, which
+    later agents still need) plus the most recent `max_history` messages, and
+    drop the accumulated middle. This caps prompt size per call regardless of
+    how many times the graph loops.
+    """
     system = {"role": "system", "content": f"You are an agent. Role: {role}"}
     history = state.get("messages", [])
     if memory_kind == "vector":
         # Placeholder hook: retrieve relevant context and prepend.
         # A real impl queries a local Chroma/LanceDB collection per agent_id.
         pass
+    if len(history) > max_history + 1:
+        # Keep the original input + the most recent max_history messages.
+        history = [history[0], *history[-max_history:]]
     return [system, *history]
 
 
